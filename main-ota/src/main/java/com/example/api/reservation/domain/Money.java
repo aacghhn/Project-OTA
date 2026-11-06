@@ -2,16 +2,14 @@ package com.example.api.reservation.domain;
 
 import java.math.BigDecimal;
 import java.util.Currency;
-import java.util.Objects;
 
 /**
  * 통화가 다른 금액은 합산, 차감, 비교하지 않는다. 환산은 여기서 하지 않는다.
- * */
+ */
 public record Money(BigDecimal amount, Currency currency) implements Comparable<Money> {
 
     public Money {
-        amount = Objects.requireNonNull(amount).stripTrailingZeros();
-        Objects.requireNonNull(currency);
+        amount = amount.stripTrailingZeros();
     }
 
     public Money plus(Money other) {
