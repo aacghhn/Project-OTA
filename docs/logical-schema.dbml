@@ -1,0 +1,396 @@
+// Project-OTA logical schema v1 — 2026-11-09
+// Domain rules, transaction boundaries and NULL conditions: domain-model.md
+// Logical types; timestamp is an absolute UTC instant. Monetary bigint is KRW won.
+// Fields are NOT NULL unless explicitly [null]. Uniques on optional values apply to non-NULL values.
+// Notes include cross-row invariants: they are NOT executable SQL CHECK constraints.
+// No cascade deletion of referenced catalog, reservation or financial records.
+
+Enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+Enum SaleStatus {
+  OPEN
+  CLOSED
+}
+
+Enum CancellationPolicy {
+  FREE_UNTIL
+  NON_REFUNDABLE
+}
+
+Enum PaymentTiming {
+  PAY_NOW
+  PAY_LATER
+}
+
+Enum ReservationStatus {
+  HOLD
+  CONFIRMED
+  RELEASED
+  CANCELLED
+}
+
+Enum ReleaseReason {
+  EXPIRED
+  CUSTOMER_ABANDONED
+  SALE_STOPPED
+  TERMS_CHANGED
+}
+
+Enum CancellationReason {
+  CUSTOMER
+  SUPPLIER_UNAVAILABLE
+  PAYMENT_FAILED
+}
+
+Enum GuestCategory {
+  ADULT
+  CHILD
+}
+
+Enum PaymentMethodStatus {
+  ACTIVE
+  REVOKED
+}
+
+Enum PaymentPurpose {
+  STAY
+  CANCELLATION_FEE
+}
+
+Enum CollectionStatus {
+  OPEN
+  STOPPED
+}
+
+Enum OperationStatus {
+  READY
+  PROCESSING
+  UNKNOWN
+  SUCCEEDED
+  FAILED
+}
+
+Enum RefundReason {
+  RESERVATION_CANCELLED
+  UNCONFIRMED_PAYMENT
+}
+
+Table account {
+  Note: '고객·파트너 소유자가 사용하는 계정 | email은 정규화한 값. 인증 구현은 이 모델의 범위 밖이다.'
+  id uuid [not null, pk]
+  email varchar [not null]
+  password_hash varchar [not null]
+  status AccountStatus [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    email [unique]
+  }
+}
+
+Table partner {
+  Note: '숙소를 소유·관리하는 파트너. 초기에는 소유자 계정 하나로 관리'
+  id uuid [not null, pk]
+  owner_account_id uuid [not null]
+  name varchar [not null]
+  status AccountStatus [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+}
+
+Table property {
+  Note: '숙소 애그리거트 | timezone = Asia/Seoul. 파트너 변경은 초기 범위 밖이다.'
+  id uuid [not null, pk]
+  partner_id uuid [not null]
+  name varchar [not null]
+  address varchar [not null]
+  city varchar [not null]
+  description text [not null]
+  timezone varchar [not null]
+  check_in_time time [not null]
+  check_out_time time [not null]
+  sale_status SaleStatus [not null]
+  version bigint [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+}
+
+Table room_type {
+  Note: '객실 유형 애그리거트. 개별 호실을 표현하지 않는다 | max_occupancy > 0. area_sqm은 NULL 또는 양수. beds/amenities/images의 구조는 도메인 문서 참조.'
+  id uuid [not null, pk]
+  property_id uuid [not null]
+  name varchar [not null]
+  description text [not null]
+  max_occupancy integer [not null]
+  area_sqm decimal [null]
+  beds json [not null]
+  amenities json [not null]
+  images json [not null]
+  sale_status SaleStatus [not null]
+  version bigint [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    (id, property_id) [unique]
+  }
+}
+
+Table rate_plan {
+  Note: '요금제 애그리거트. 혜택·취소·결제 정책을 소유 | FREE_UNTIL이면 free_cancel_days_before >= 0, NON_REFUNDABLE이면 NULL. PAY_LATER이면 payment_days_before >= 0, PAY_NOW이면 NULL.'
+  id uuid [not null, pk]
+  property_id uuid [not null]
+  name varchar [not null]
+  benefits json [not null]
+  cancellation_policy CancellationPolicy [not null]
+  free_cancel_days_before integer [null]
+  payment_timing PaymentTiming [not null]
+  payment_days_before integer [null]
+  sale_status SaleStatus [not null]
+  version bigint [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    (id, property_id) [unique]
+  }
+}
+
+Table room_rate {
+  Note: '객실 유형·요금제 조합 애그리거트. 날짜별 가격을 소유 | 세 참조는 같은 숙소에 속한다. 연결 대상은 생성 후 변경하지 않는다.'
+  id uuid [not null, pk]
+  property_id uuid [not null]
+  room_type_id uuid [not null]
+  rate_plan_id uuid [not null]
+  sale_status SaleStatus [not null]
+  version bigint [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    (room_type_id, rate_plan_id) [unique]
+    (id, room_type_id) [unique]
+  }
+}
+
+Table daily_rate {
+  Note: 'RoomRate 내부의 날짜별 단가 값 | unit_amount > 0. KRW, 1객실 1박, 필수 요금 포함. 행이 없으면 해당 날짜 판매 불가.'
+  room_rate_id uuid [not null]
+  stay_date date [not null]
+  unit_amount bigint [not null]
+
+  indexes {
+    (room_rate_id, stay_date) [pk]
+  }
+}
+
+Table daily_inventory {
+  Note: '객실 유형·숙박일별 재고 애그리거트. 판매 한도의 원본 | sales_limit >= 0. 점유량은 유효 예약으로 계산한다. 카운터·잔여 수량은 저장하지 않는다.'
+  room_type_id uuid [not null]
+  stay_date date [not null]
+  sales_limit integer [not null]
+  sale_stopped boolean [not null]
+  version bigint [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    (room_type_id, stay_date) [pk]
+  }
+}
+
+Table reservation {
+  Note: '예약 애그리거트. 선점부터 확정·취소까지 같은 식별자 | quantity > 0; check_in_date < check_out_date; held_at < expires_at; total_amount > 0; currency = KRW. 상태별 시각·사유·금액의 NULL 조건은 도메인 문서 참조. | cancellation_fee는 NULL 또는 0 이상 total_amount 이하. 예약 조건·숙박일·투숙객·동의는 생성 후 불변. | product_snapshot은 이름·주소·객실 설명·시설·사진의 고정 구조 스냅샷. 실제 구조는 도메인 문서 참조.'
+  id uuid [not null, pk]
+  booker_id uuid [not null]
+  request_key varchar [not null]
+  request_hash varchar [not null]
+  room_rate_id uuid [not null]
+  room_type_id uuid [not null]
+  check_in_date date [not null]
+  check_out_date date [not null]
+  quantity integer [not null]
+  status ReservationStatus [not null]
+  held_at timestamp [not null]
+  expires_at timestamp [not null]
+  confirmed_at timestamp [null]
+  released_at timestamp [null]
+  release_reason ReleaseReason [null]
+  cancellation_requested_at timestamp [null]
+  cancelled_at timestamp [null]
+  cancellation_reason CancellationReason [null]
+  cancellation_note text [null]
+  cancellation_fee bigint [null]
+  guest_name varchar [not null]
+  guest_contact varchar [not null]
+  special_request text [null]
+  product_snapshot json [not null]
+  check_in_at_snapshot timestamp [not null]
+  check_out_at_snapshot timestamp [not null]
+  max_occupancy_snapshot integer [not null]
+  benefits_snapshot json [not null]
+  cancellation_policy_snapshot CancellationPolicy [not null]
+  free_cancel_until timestamp [null]
+  payment_timing_snapshot PaymentTiming [not null]
+  payment_due_at timestamp [not null]
+  total_amount bigint [not null]
+  currency varchar [not null]
+  terms_hash varchar [not null]
+  version bigint [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    (booker_id, request_key) [unique]
+    (id, room_type_id) [unique]
+  }
+}
+
+Table reservation_night {
+  Note: 'Reservation 내부의 숙박일·가격 스냅샷. 재고 조회 연결점 | 체크인 포함·체크아웃 제외의 모든 날짜가 정확히 한 번 존재. unit_amount > 0. total_amount = quantity * SUM(unit_amount).'
+  reservation_id uuid [not null]
+  room_type_id uuid [not null]
+  stay_date date [not null]
+  unit_amount bigint [not null]
+
+  indexes {
+    (reservation_id, stay_date) [pk]
+  }
+}
+
+Table reservation_guest {
+  Note: 'Reservation 내부의 객실별 투숙객 구성. 물리적 호실 배정이 아니다 | room_sequence는 1..quantity, guest_sequence > 0. 각 객실은 1명 이상 max_occupancy_snapshot 이하. CHILD는 체크인 시 만 나이 0..17, ADULT는 나이 NULL. 모든 인원을 정원에 포함.'
+  reservation_id uuid [not null]
+  room_sequence integer [not null]
+  guest_sequence integer [not null]
+  category GuestCategory [not null]
+  child_age_at_check_in integer [null]
+
+  indexes {
+    (reservation_id, room_sequence, guest_sequence) [pk]
+  }
+}
+
+Table reservation_consent {
+  Note: 'Reservation 내부의 동의 이력 스냅샷 | 필수 OFFER/TERMS/PRIVACY 항목을 저장. OFFER의 agreement_version은 reservation.terms_hash와 같음.'
+  reservation_id uuid [not null]
+  agreement_code varchar [not null]
+  agreement_version varchar [not null]
+  agreed_at timestamp [not null]
+
+  indexes {
+    (reservation_id, agreement_code) [pk]
+  }
+}
+
+Table payment_method {
+  Note: '결제 수단 참조 애그리거트. PG 시뮬레이터 토큰만 저장 | 원본 카드 정보는 저장하지 않는다. 청구 생성 시 예약자 소유이고 활성 상태인 수단만 선택.'
+  id uuid [not null, pk]
+  account_id uuid [not null]
+  provider varchar [not null]
+  provider_method_ref varchar [not null]
+  status PaymentMethodStatus [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    (provider, provider_method_ref) [unique]
+  }
+}
+
+Table payment_order {
+  Note: '청구 애그리거트. 결제 시도와 환불을 소유 | amount > 0; currency = KRW. 금액·목적·기한은 생성 후 불변. STOPPED이면 stopped_at 필수, OPEN이면 NULL. | STAY 금액은 예약 총액. CANCELLATION_FEE는 CANCELLED 예약의 확정 비용 중 실제 부족액이며 생성 시점에 판단한다.'
+  id uuid [not null, pk]
+  reservation_id uuid [not null]
+  purpose PaymentPurpose [not null]
+  amount bigint [not null]
+  currency varchar [not null]
+  due_at timestamp [not null]
+  collection_status CollectionStatus [not null]
+  stopped_at timestamp [null]
+  version bigint [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    (reservation_id, purpose) [unique]
+  }
+}
+
+Table payment_attempt {
+  Note: 'PaymentOrder 내부의 한 논리적 결제 시도. 통신 재전송은 같은 행 사용 | amount > 0이고 청구 금액과 같음. attempt_number > 0. 동일 청구에서 SUCCEEDED/READY/PROCESSING/UNKNOWN 합계 1건 이하. 최초 READY도 나중 결제에 사용할 수단을 보존한다.'
+  id uuid [not null, pk]
+  payment_order_id uuid [not null]
+  attempt_number integer [not null]
+  payment_method_id uuid [not null]
+  provider varchar [not null]
+  idempotency_key varchar [not null]
+  provider_payment_id varchar [null]
+  amount bigint [not null]
+  status OperationStatus [not null]
+  started_at timestamp [null]
+  completed_at timestamp [null]
+  last_checked_at timestamp [null]
+  next_action_at timestamp [null]
+  last_error_code varchar [null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    (payment_order_id, attempt_number) [unique]
+    (provider, idempotency_key) [unique]
+    (provider, provider_payment_id) [unique]
+  }
+}
+
+Table refund {
+  Note: 'PaymentOrder 내부의 한 환불 요청. 확정 실패의 재시도만 새 행 생성 | amount > 0. 원결제는 SUCCEEDED. 원결제별 성공+대기+진행+결과불명 환불 합계 <= 결제 성공 금액. | retry_of_id는 같은 원결제의 FAILED 환불만 참조하며 금액·사유가 같음. 실패 행에는 후속 재시도 하나만 허용.'
+  id uuid [not null, pk]
+  payment_attempt_id uuid [not null]
+  retry_of_id uuid [null]
+  reason RefundReason [not null]
+  amount bigint [not null]
+  provider varchar [not null]
+  idempotency_key varchar [not null]
+  provider_refund_id varchar [null]
+  status OperationStatus [not null]
+  started_at timestamp [null]
+  completed_at timestamp [null]
+  last_checked_at timestamp [null]
+  next_action_at timestamp [null]
+  last_error_code varchar [null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    retry_of_id [unique]
+    (provider, idempotency_key) [unique]
+    (provider, provider_refund_id) [unique]
+  }
+}
+
+Ref: partner.owner_account_id > account.id [delete: restrict, update: restrict]
+Ref: property.partner_id > partner.id [delete: restrict, update: restrict]
+Ref: room_type.property_id > property.id [delete: restrict, update: restrict]
+Ref: rate_plan.property_id > property.id [delete: restrict, update: restrict]
+Ref: room_rate.property_id > property.id [delete: restrict, update: restrict]
+Ref: room_rate.(room_type_id, property_id) > room_type.(id, property_id) [delete: restrict, update: restrict]
+Ref: room_rate.(rate_plan_id, property_id) > rate_plan.(id, property_id) [delete: restrict, update: restrict]
+Ref: daily_rate.room_rate_id > room_rate.id [delete: restrict, update: restrict]
+Ref: daily_inventory.room_type_id > room_type.id [delete: restrict, update: restrict]
+Ref: reservation.booker_id > account.id [delete: restrict, update: restrict]
+Ref: reservation.(room_rate_id, room_type_id) > room_rate.(id, room_type_id) [delete: restrict, update: restrict]
+Ref: reservation_night.(reservation_id, room_type_id) > reservation.(id, room_type_id) [delete: restrict, update: restrict]
+Ref: reservation_night.(room_type_id, stay_date) > daily_inventory.(room_type_id, stay_date) [delete: restrict, update: restrict]
+Ref: reservation_guest.reservation_id > reservation.id [delete: restrict, update: restrict]
+Ref: reservation_consent.reservation_id > reservation.id [delete: restrict, update: restrict]
+Ref: payment_method.account_id > account.id [delete: restrict, update: restrict]
+Ref: payment_order.reservation_id > reservation.id [delete: restrict, update: restrict]
+Ref: payment_attempt.payment_order_id > payment_order.id [delete: restrict, update: restrict]
+Ref: payment_attempt.payment_method_id > payment_method.id [delete: restrict, update: restrict]
+Ref: refund.payment_attempt_id > payment_attempt.id [delete: restrict, update: restrict]
+Ref: refund.retry_of_id > refund.id [delete: restrict, update: restrict]
