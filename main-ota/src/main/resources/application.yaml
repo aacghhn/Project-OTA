@@ -1,3 +1,7 @@
 spring:
   application:
     name: main-ota
+springdoc:
+  api-docs:
+    version: openapi_3_0
+  override-with-generic-response: false

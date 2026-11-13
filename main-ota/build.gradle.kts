@@ -10,7 +10,7 @@ description = "main-ota"
 
 java {
 	toolchain {
-		languageVersion = JavaLanguageVersion.of(25)
+		languageVersion = JavaLanguageVersion.of(21)
 	}
 }
 
@@ -20,6 +20,8 @@ repositories {
 
 dependencies {
 	implementation("org.springframework.boot:spring-boot-starter-webmvc")
+	implementation("org.springframework.boot:spring-boot-starter-validation")
+	implementation("org.springdoc:springdoc-openapi-starter-webmvc-api:3.2.0")
 	compileOnly("org.projectlombok:lombok")
 	annotationProcessor("org.projectlombok:lombok")
 	testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
@@ -30,4 +32,22 @@ dependencies {
 
 tasks.withType<Test> {
 	useJUnitPlatform()
+}
+
+tasks.test {
+	inputs.file(layout.projectDirectory.file("openapi.yaml"))
+}
+
+tasks.register<Test>("generateOpenApi") {
+	group = "documentation"
+	description = "Generate openapi.yaml from the running Spring MVC API documentation."
+	testClassesDirs = sourceSets.test.get().output.classesDirs
+	classpath = sourceSets.test.get().runtimeClasspath
+	filter {
+		includeTestsMatching("com.example.api.MainOtaApplicationTests.apiDocumentationSnapshot")
+	}
+	val destination = layout.projectDirectory.file("openapi.yaml")
+	systemProperty("openapi.output", destination.asFile.absolutePath)
+	outputs.file(destination)
+	outputs.upToDateWhen { false }
 }
